@@ -1,11 +1,7 @@
 import sqlite3
-import smtplib
 import bcrypt
 import os
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from functools import wraps
 from flask import Flask, request, jsonify, g, render_template
 from flask_jwt_extended import (
     JWTManager, create_access_token,
@@ -13,18 +9,15 @@ from flask_jwt_extended import (
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# ── 1. CONFIGURATION ──────────────────────────────────────────────────────────
+# ── 1. APP INITIALIZATION (MUST BE FIRST) ──────────────────────────────────
+app = Flask(__name__)
+
+# ── 2. CONFIGURATION ─────────────────────────────────────────────────────────
 class Config:
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "eco-tracker-secure-key-2026")
-    DATABASE = "eco_tracker.db"
-    # Set these in Render Environment Variables for email features
-    EMAIL_SENDER   = os.environ.get("EMAIL_SENDER")
-    EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
-    SMTP_HOST      = "smtp.gmail.com"
-    SMTP_PORT      = 587
+    # This database path works for both local development and Render
+    DATABASE = "eco_tracker.db" 
 
-# ── 2. APP INITIALIZATION (Must be before decorators) ────────────────────────
-app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = Config.JWT_SECRET_KEY
 jwt = JWTManager(app)
 
@@ -44,73 +37,61 @@ def close_db(e=None):
 def init_db():
     with sqlite3.connect(Config.DATABASE) as conn:
         c = conn.cursor()
+        # Create Users Table
         c.execute("""CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT, email TEXT UNIQUE, store_name TEXT, password TEXT, role TEXT)""")
+        # Create Products Table
         c.execute("""CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT, store_name TEXT, name TEXT, 
             qty INTEGER, min_qty INTEGER, exp TEXT, added_by INTEGER)""")
+        # Create Email/Alert Log Table
         c.execute("""CREATE TABLE IF NOT EXISTS email_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, store_name TEXT, type TEXT, name TEXT, msg TEXT)""")
         conn.commit()
 
-# ── 4. EXPIRY & STOCK LOGIC (Internal Background Tasks) ──────────────────────
-def run_expiry_check():
-    # This runs in the background to log alerts
-    with sqlite3.connect(Config.DATABASE) as conn:
-        conn.row_factory = sqlite3.Row
-        now = datetime.now()
-        products = conn.execute("SELECT * FROM products").fetchall()
-        
-        for p in products:
-            if not p["exp"]: continue
-            try:
-                expiry_dt = datetime.strptime(p["exp"], "%Y-%m-%d")
-                days_left = (expiry_dt - now).days
-                # Logic to trigger background emails for 3-4 days could go here
-            except: continue
-
-# ── 5. API ROUTES ────────────────────────────────────────────────────────────
+# ── 4. API ROUTES ────────────────────────────────────────────────────────────
 
 @app.route('/')
-def index(): 
+def index():
     return render_template('store.html')
 
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     data = request.get_json()
-    # Password hashing
     hashed = bcrypt.hashpw(data["password"].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
     db = get_db()
     try:
         db.execute("INSERT INTO users (name, email, store_name, password, role) VALUES (?,?,?,?,?)",
                    (data["name"], data["email"].lower(), data["store_name"], hashed, data["role"]))
         db.commit()
-        return jsonify({"message": "Account created successfully"}), 201
+        return jsonify({"message": "Registered successfully"}), 201
     except sqlite3.IntegrityError:
         return jsonify({"error": "Email already exists"}), 409
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json()
-    user = get_db().execute("SELECT * FROM users WHERE email = ?", (data["email"].lower(),)).fetchone()
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE email = ?", (data["email"].lower(),)).fetchone()
     
     if user and bcrypt.checkpw(data["password"].encode('utf-8'), user["password"].encode('utf-8')):
-        token = create_access_token(identity={
-            "id": user["id"], 
-            "store_name": user["store_name"], 
-            "role": user["role"]
-        })
-        return jsonify({"token": token, "user": {"name": user["name"], "role": user["role"]}})
+        # Token carries store_name to isolate data
+        token = create_access_token(
+            identity={"id": user["id"], "store_name": user["store_name"]}, 
+            expires_delta=timedelta(days=1)
+        )
+        return jsonify({"token": token, "user": {"name": user["name"]}})
     return jsonify({"error": "Invalid email or password"}), 401
 
 @app.route("/api/dashboard", methods=["GET"])
 @jwt_required()
 def dashboard():
-    store = get_jwt_identity()["store_name"]
+    identity = get_jwt_identity()
+    store = identity["store_name"]
     db = get_db()
     
-    # 1. Fetch ONLY products for this specific store (Fresh account = Empty list)
+    # Isolation: Only fetch products belonging to this specific store
     rows = db.execute("SELECT * FROM products WHERE store_name = ?", (store,)).fetchall()
     products = [dict(r) for r in rows]
     
@@ -119,31 +100,26 @@ def dashboard():
     low_stock_alerts = []
     
     for p in products:
-        # 2. Expiry Logic (Specifically showing 3-4 days window)
+        # Expiry Logic (Requirement: 3-4 day window)
         if p["exp"]:
             try:
                 expiry_date = datetime.strptime(p["exp"], "%Y-%m-%d")
                 d_left = (expiry_date - now).days
-                
-                # If product is within 4 days of expiring, add to alerts
                 if d_left <= 4:
                     p["days_left"] = d_left
                     expiry_alerts.append(p)
             except: pass
 
-        # 3. Stock Logic (If stock is replaced/increased, this alert disappears)
+        # Stock Logic
         if p["qty"] <= (p["min_qty"] or 0):
             low_stock_alerts.append(p)
 
-    metrics = {
-        "total_products": len(products),
-        "expiry_count": len(expiry_alerts),
-        "low_stock_count": len(low_stock_alerts),
-        "total_stock": sum(p["qty"] for p in products)
-    }
-    
     return jsonify({
-        "metrics": metrics, 
+        "metrics": {
+            "total_products": len(products),
+            "expiry_count": len(expiry_alerts),
+            "low_stock_count": len(low_stock_alerts)
+        },
         "expiry_alerts": expiry_alerts,
         "low_stock_alerts": low_stock_alerts
     })
@@ -156,19 +132,19 @@ def add_product():
     db = get_db()
     db.execute("""INSERT INTO products (store_name, name, qty, min_qty, exp, added_by) 
                   VALUES (?, ?, ?, ?, ?, ?)""",
-               (identity["store_name"], data["name"], data["qty"], data.get("min", 0), data.get("exp"), identity["id"]))
+               (identity["store_name"], data["name"], data["qty"], 
+                data.get("min", 0), data.get("exp"), identity["id"]))
     db.commit()
-    return jsonify({"message": "Product added"}), 201
+    return jsonify({"message": "Product added successfully"}), 201
 
-# ── 6. RUNNER ────────────────────────────────────────────────────────────────
+# ── 5. RUNNER ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     init_db()
     
-    # Start background scheduler for automated checks
+    # Background scheduler can be used here for automated email tasks in the future
     scheduler = BackgroundScheduler()
-    scheduler.add_job(run_expiry_check, 'interval', hours=1)
     scheduler.start()
     
-    # Render uses the PORT environment variable
+    # Render and other hosts use the PORT environment variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
