@@ -1,6 +1,7 @@
 import sqlite3
 import smtplib
 import bcrypt
+import os  # Added to read Render Environment Variables
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -12,16 +13,22 @@ from flask_jwt_extended import (
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# ── CONFIGURATION (Updated for Render) ───────────────────────────────────────
 class Config:
-    JWT_SECRET_KEY = "eco-tracker-secret-change-me-2024"
+    # Use environment variables for security. If not set, it uses 'dev-secret'
+    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "eco-tracker-dev-secret")
     SESSION_HOURS = 24
     DATABASE = "eco_tracker.db"
-    EMAIL_SENDER   = "your_email@gmail.com"
-    EMAIL_PASSWORD = "your_app_password_here"
+    
+    # These must be set in the 'Environment' tab on Render
+    EMAIL_SENDER   = os.environ.get("EMAIL_SENDER")
+    EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+    
     SMTP_HOST      = "smtp.gmail.com"
     SMTP_PORT      = 587
     LOW_STOCK_DEFAULT_MIN = 10
 
+# ── DATABASE HELPERS ──────────────────────────────────────────────────────────
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(Config.DATABASE)
@@ -84,6 +91,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+# ── EMAIL & ALERTS ────────────────────────────────────────────────────────────
 ALERT_STYLES = {
     "Expired": ("#e74c3c", "🚨"),
     "Expiry 48h": ("#e74c3c", "⏰"),
@@ -93,6 +101,10 @@ ALERT_STYLES = {
 }
 
 def send_email(to_address, product_name, alert_type, message):
+    if not Config.EMAIL_SENDER or not Config.EMAIL_PASSWORD:
+        print("Skipping email: No credentials set in Environment Variables")
+        return False
+
     color, icon = ALERT_STYLES.get(alert_type, ("#27ae60", "ℹ️"))
     subject = f"[Eco-Tracker] {alert_type} — {product_name}"
     html = f"""
@@ -132,7 +144,8 @@ def send_email(to_address, product_name, alert_type, message):
             server.login(Config.EMAIL_SENDER, Config.EMAIL_PASSWORD)
             server.sendmail(Config.EMAIL_SENDER, to_address, msg.as_string())
         return True
-    except Exception:
+    except Exception as e:
+        print(f"Email Error: {e}")
         return False
 
 def run_expiry_check():
@@ -170,6 +183,7 @@ def _alert(conn, product, emails, alert_type, message):
             conn.execute("INSERT INTO email_log (store_name, product_id, type, name, msg, sent_to) VALUES (?, ?, ?, ?, ?, ?)",
                          (product["store_name"], product["id"], alert_type, product["name"], message, email))
 
+# ── FLASK ROUTES ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = Config.JWT_SECRET_KEY
 jwt = JWTManager(app)
@@ -183,6 +197,7 @@ def owner_only(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+@app.route('/')
 @app.route('/store')
 def view_store():
     return render_template('store.html')
@@ -221,7 +236,10 @@ def dashboard():
     products = [dict(r) for r in get_db().execute("SELECT * FROM products WHERE store_name = ?", (store,)).fetchall()]
     now = datetime.now()
     for p in products:
-        p["days_left"] = (datetime.strptime(p["exp"], "%Y-%m-%d") - now).days if p["exp"] else None
+        try:
+            p["days_left"] = (datetime.strptime(p["exp"], "%Y-%m-%d") - now).days if p["exp"] else None
+        except:
+            p["days_left"] = None
     metrics = {
         "total": len(products),
         "expired_or_critical": sum(1 for p in products if p["days_left"] is not None and p["days_left"] <= 2),
@@ -298,10 +316,13 @@ def trigger_check():
     run_expiry_check()
     return jsonify({"message": "Check completed"}), 200
 
+# ── RUNNER ───────────────────────────────────────────────────────────────────
+init_db()
+scheduler = BackgroundScheduler()
+scheduler.add_job(func=run_expiry_check, trigger="interval", hours=1, id="expiry_check", max_instances=1)
+scheduler.start()
+
 if __name__ == "__main__":
-    init_db()
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=run_expiry_check, trigger="interval", hours=1, id="expiry_check", max_instances=1)
-    scheduler.start()
-    run_expiry_check()
-    app.run(debug=True, port=5000)
+    # Use the port Render tells us to use, or 5000 if local
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
