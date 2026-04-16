@@ -1,28 +1,3 @@
-# ==============================================================================
-#  🌿  ECO-TRACKER — PYTHON BACKEND  (Single File, Beginner Friendly)
-#
-#  Matches the uploaded frontend exactly:
-#    ✅  Login / Register  (Owner + Manager roles, Store-scoped)
-#    ✅  Dashboard         (6 metric cards, Expiry alerts, Stock alerts)
-#    ✅  Scan & Add Stock  (QR scan data + Manual entry)
-#    ✅  Inventory         (Search, filter, delete products)
-#    ✅  Email Log         (View alert emails sent; clear log)
-#    ✅  Accounts          (Owner-only; list + remove accounts)
-#
-#  INSTALL (run once in your terminal):
-#      pip install flask flask-jwt-extended bcrypt apscheduler
-#
-#  CONFIGURE:
-#      Edit the Config section below (JWT key + Gmail details)
-#
-#  RUN:
-#      python eco_tracker_backend.py
-#
-#  Server starts at:  http://localhost:5000
-# ==============================================================================
-
-
-# ── Standard library ──────────────────────────────────────────────────────────
 import sqlite3
 import smtplib
 from datetime import datetime, timedelta
@@ -47,37 +22,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 class Config:
 
-    # ── Security ──────────────────────────────────────────────────────────────
-    # Change this to any long random string before going live.
     JWT_SECRET_KEY = "eco-tracker-secret-change-me-2024"
 
-    # How long a login session lasts before the user must log in again
     SESSION_HOURS = 24
 
-    # ── Database ──────────────────────────────────────────────────────────────
-    # SQLite stores everything in this single file. Created automatically.
     DATABASE = "eco_tracker.db"
 
-    # ── Email (Gmail) ─────────────────────────────────────────────────────────
-    # Step 1: Put your Gmail address here
-    # Step 2: Create an App Password at https://myaccount.google.com/apppasswords
-    #         (this is NOT your regular Gmail password)
-    # Step 3: Paste that 16-character App Password in EMAIL_PASSWORD
     EMAIL_SENDER   = "your_email@gmail.com"
     EMAIL_PASSWORD = "your_app_password_here"
     SMTP_HOST      = "smtp.gmail.com"
     SMTP_PORT      = 587
 
-    # ── Alert thresholds (match frontend defaults) ────────────────────────────
-    # Products with quantity <= this value trigger a Low Stock alert
     LOW_STOCK_DEFAULT_MIN = 10
 
-
-# ==============================================================================
-#  🗄️  SECTION 2 — DATABASE SETUP
-#  SQLite is a file-based database — no separate server needed.
-#  All data is stored in eco_tracker.db in the same folder as this script.
-# ==============================================================================
 
 def get_db():
     """
@@ -116,9 +73,6 @@ def init_db():
     conn = raw_db()
     c    = conn.cursor()
 
-    # ── users ─────────────────────────────────────────────────────────────────
-    # Stores Owner and Manager accounts, grouped by store_name.
-    # (Frontend: Register page has Name, Email, Store Name, Role, Password fields)
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id          INTEGER  PRIMARY KEY AUTOINCREMENT,
@@ -131,10 +85,6 @@ def init_db():
         )
     """)
 
-    # ── products ──────────────────────────────────────────────────────────────
-    # One row per product batch.
-    # Fields map directly to the frontend's Scan & Add Stock form:
-    #   name, batch, cat(egory), qty, min(imum stock), exp(iry date), price, loc(ation)
     c.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id          INTEGER  PRIMARY KEY AUTOINCREMENT,
@@ -153,9 +103,6 @@ def init_db():
         )
     """)
 
-    # ── email_log ─────────────────────────────────────────────────────────────
-    # Matches the frontend's "Email Log" tab exactly.
-    # Every alert (Expired, Expiry 48h, Expiry 7d, Out of Stock, Low Stock) is saved here.
     c.execute("""
         CREATE TABLE IF NOT EXISTS email_log (
             id          INTEGER  PRIMARY KEY AUTOINCREMENT,
@@ -173,14 +120,6 @@ def init_db():
     conn.close()
     print("✅  Database ready.")
 
-
-# ==============================================================================
-#  ✉️  SECTION 3 — EMAIL UTILITY
-#  Sends branded HTML alert emails via Gmail.
-#  Called by the background monitor (Section 4) automatically.
-# ==============================================================================
-
-# Colour + emoji for each alert type (matches frontend colour coding)
 ALERT_STYLES = {
     "Expired":      ("#e74c3c", "🚨"),
     "Expiry 48h":   ("#e74c3c", "⏰"),
@@ -278,14 +217,6 @@ def send_email(to_address, product_name, alert_type, message):
         print(f"  ❌  Email failed: {err}")
         return False
 
-
-# ==============================================================================
-#  ⏰  SECTION 4 — BACKGROUND MONITOR
-#  Runs every hour automatically (via APScheduler).
-#  Scans every product and fires email alerts where needed.
-#  Alert types mirror exactly what the frontend shows in the Email Log tab.
-# ==============================================================================
-
 def run_expiry_check():
     """
     Hourly background job:
@@ -322,7 +253,6 @@ def run_expiry_check():
         if not owner_emails:
             continue   # No owners registered for this store yet
 
-        # ── Expiry date checks ────────────────────────────────────────────────
         if p["exp"]:
             try:
                 expiry_dt  = datetime.strptime(p["exp"], "%Y-%m-%d")
@@ -348,7 +278,6 @@ def run_expiry_check():
                 _alert(conn, p, owner_emails, "Expiry 7d", msg)
                 alerts_sent += 1
 
-        # ── Stock level checks ────────────────────────────────────────────────
         qty = p["qty"]
         mn  = p["min_qty"] or 0
 
@@ -381,10 +310,6 @@ def _alert(conn, product, emails, alert_type, message):
             """, (product["store_name"], product["id"],
                   alert_type, product["name"], message, email))
 
-
-# ==============================================================================
-#  🌐  SECTION 5 — FLASK APP + HELPERS
-# ==============================================================================
 
 app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = Config.JWT_SECRET_KEY
@@ -419,18 +344,6 @@ def me():
     """Shortcut: returns the logged-in user's identity dict from the JWT token."""
     return get_jwt_identity()
 
-
-# ==============================================================================
-#  🔐  SECTION 6 — AUTH ROUTES
-#
-#  POST /api/auth/register   →  Create an account (Owner or Manager)
-#  POST /api/auth/login      →  Log in, receive JWT token
-#
-#  Frontend fields used:
-#    Register: name, email, store_name, role ('owner'/'manager'), password
-#    Login:    email, password
-# ==============================================================================
-
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     """
@@ -450,7 +363,6 @@ def register():
     """
     data = request.get_json() or {}
 
-    # ── Validate required fields ───────────────────────────────────────────
     for field in ("name", "email", "store_name", "role", "password"):
         if not data.get(field):
             return jsonify({"error": f"'{field}' is required"}), 400
@@ -461,9 +373,6 @@ def register():
     if len(data["password"]) < 6:
         return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-    # ── Hash the password before saving ───────────────────────────────────
-    # bcrypt automatically generates a random salt and hashes the password.
-    # We NEVER store plain-text passwords.
     hashed = bcrypt.hashpw(
         data["password"].encode("utf-8"),
         bcrypt.gensalt()
@@ -517,7 +426,6 @@ def login():
     ):
         return jsonify({"error": "Incorrect email or password"}), 401
 
-    # Build the JWT token. The identity is embedded inside the token.
     token = create_access_token(
         identity={
             "id":         user["id"],
@@ -540,15 +448,6 @@ def login():
         }
     }), 200
 
-
-# ==============================================================================
-#  📊  SECTION 7 — DASHBOARD ROUTE
-#
-#  GET /api/dashboard
-#
-#  Returns the 6 metric cards + expiry alert list + stock alert list
-#  exactly as shown on the frontend Dashboard tab.
-# ==============================================================================
 
 @app.route("/api/dashboard", methods=["GET"])
 @jwt_required()
@@ -574,8 +473,6 @@ def dashboard():
         "SELECT * FROM products WHERE store_name = ?", (store,)
     ).fetchall()
 
-    # ── Calculate days remaining for each product ──────────────────────────
-    # (Same logic as the frontend's days(exp) function)
     enriched = []
     for row in products:
         p = dict(row)
@@ -588,7 +485,6 @@ def dashboard():
                 pass
         enriched.append(p)
 
-    # ── 6 metric cards ────────────────────────────────────────────────────
     total           = len(enriched)
     expired_crit    = sum(1 for p in enriched
                          if p["days_left"] is not None and p["days_left"] <= 2)
@@ -602,13 +498,11 @@ def dashboard():
                          and p["qty"] <= p["min_qty"])
     total_units     = sum(p["qty"] for p in enriched)
 
-    # ── Expiry alert list (products expiring within 7 days or already expired) ──
     expiry_alerts = sorted(
         [p for p in enriched if p["days_left"] is not None and p["days_left"] <= 7],
         key=lambda p: p["days_left"]
     )
 
-    # ── Stock alert list (out of stock OR low stock) ───────────────────────
     stock_alerts = sorted(
         [p for p in enriched
          if p["qty"] == 0 or (p["min_qty"] > 0 and p["qty"] <= p["min_qty"])],
@@ -628,19 +522,6 @@ def dashboard():
         "stock_alerts":  stock_alerts,
     }), 200
 
-
-# ==============================================================================
-#  📦  SECTION 8 — PRODUCT ROUTES
-#
-#  GET    /api/products/              → list all (with search + filter)
-#  POST   /api/products/              → add product (manual entry or QR scan)
-#  DELETE /api/products/<id>          → remove a product
-#  PATCH  /api/products/<id>/stock    → update quantity
-#
-#  Frontend fields (Scan & Add Stock form):
-#    name, batch, cat, qty, min (min stock alert), exp, price, loc
-# ==============================================================================
-
 @app.route("/api/products/", methods=["GET"])
 @jwt_required()
 def list_products():
@@ -658,7 +539,6 @@ def list_products():
     db    = get_db()
     now   = datetime.now()
 
-    # Get query params from the URL  e.g. /api/products/?q=milk&f=exp
     search = (request.args.get("q") or "").lower()
     filt   = request.args.get("f") or ""
 
@@ -670,7 +550,6 @@ def list_products():
     for row in products:
         p = dict(row)
 
-        # Calculate days_left
         p["days_left"] = None
         if p["exp"]:
             try:
@@ -678,12 +557,10 @@ def list_products():
             except ValueError:
                 pass
 
-        # ── Apply search filter ────────────────────────────────────────────
         if search:
             if search not in p["name"].lower() and search not in (p["batch"] or "").lower():
                 continue
 
-        # ── Apply category filter ──────────────────────────────────────────
         if filt == "exp":
             # Show only expired or expiring within 48h (Critical)
             if p["days_left"] is None or p["days_left"] > 2:
@@ -697,7 +574,6 @@ def list_products():
 
         result.append(p)
 
-    # Sort by expiry date (soonest first, None last)
     result.sort(key=lambda p: (p["exp"] is None, p["exp"]))
 
     return jsonify(result), 200
@@ -832,14 +708,6 @@ def update_stock(product_id):
     db.commit()
     return jsonify({"message": "Stock updated", "new_qty": new_qty}), 200
 
-
-# ==============================================================================
-#  ✉️  SECTION 9 — EMAIL LOG ROUTES
-#
-#  GET    /api/email-log/    → view the log (Email Log tab)
-#  DELETE /api/email-log/    → clear the log ("Clear" button on Email Log tab)
-# ==============================================================================
-
 @app.route("/api/email-log/", methods=["GET"])
 @jwt_required()
 def get_email_log():
@@ -899,17 +767,6 @@ def clear_email_log():
     db.execute("DELETE FROM email_log WHERE store_name = ?", (store,))
     db.commit()
     return jsonify({"message": "Email log cleared"}), 200
-
-
-# ==============================================================================
-#  👥  SECTION 10 — ACCOUNT MANAGEMENT ROUTES  (Owner Only)
-#
-#  GET    /api/accounts/       → list all accounts in this store
-#  DELETE /api/accounts/<id>   → remove an account
-#
-#  Frontend: Accounts tab — only visible when logged in as Owner.
-#  Shows a table of Name | Email | Role | Joined | Remove button.
-# ==============================================================================
 
 @app.route("/api/accounts/", methods=["GET"])
 @jwt_required()
@@ -979,15 +836,6 @@ def remove_account(user_id):
     db.commit()
     return jsonify({"message": "Account removed"}), 200
 
-
-# ==============================================================================
-#  🚀  SECTION 11 — MANUAL ALERT TRIGGER
-#
-#  POST /api/alerts/trigger
-#  Lets you manually run the expiry check right now without waiting an hour.
-#  Useful for testing email delivery.
-# ==============================================================================
-
 @app.route("/api/alerts/trigger", methods=["POST"])
 @jwt_required()
 def trigger_check():
@@ -997,11 +845,6 @@ def trigger_check():
     """
     run_expiry_check()
     return jsonify({"message": "Expiry check completed"}), 200
-
-
-# ==============================================================================
-#  🏁  SECTION 12 — STARTUP
-# ==============================================================================
 
 if __name__ == "__main__":
 
@@ -1055,38 +898,3 @@ if __name__ == "__main__":
     """)
 
     app.run(debug=True, port=5000)
-
-
-# ==============================================================================
-#  📖  HOW TO TEST  (using curl in your terminal)
-#
-#  Register an owner:
-#    curl -X POST http://localhost:5000/api/auth/register \
-#         -H "Content-Type: application/json" \
-#         -d '{"name":"Ravi Kumar","email":"ravi@store.com","password":"pass123",
-#              "store_name":"Green Mart","role":"owner"}'
-#
-#  Login (copy the "token" value from the response):
-#    curl -X POST http://localhost:5000/api/auth/login \
-#         -H "Content-Type: application/json" \
-#         -d '{"email":"ravi@store.com","password":"pass123"}'
-#
-#  Add a product (replace TOKEN with your actual token):
-#    curl -X POST http://localhost:5000/api/products/ \
-#         -H "Authorization: Bearer TOKEN" \
-#         -H "Content-Type: application/json" \
-#         -d '{"name":"Organic Milk","batch":"B001","cat":"Dairy",
-#              "qty":12,"min":30,"exp":"2024-12-01","price":45,"loc":"Cooler A"}'
-#
-#  View dashboard:
-#    curl http://localhost:5000/api/dashboard \
-#         -H "Authorization: Bearer TOKEN"
-#
-#  View email log:
-#    curl http://localhost:5000/api/email-log/ \
-#         -H "Authorization: Bearer TOKEN"
-#
-#  Trigger an immediate expiry check:
-#    curl -X POST http://localhost:5000/api/alerts/trigger \
-#         -H "Authorization: Bearer TOKEN"
-# ==============================================================================
